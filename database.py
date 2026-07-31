@@ -1,10 +1,9 @@
 import sqlite3
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 
-# روی Railway اگر Volume به /data وصل باشد از آن استفاده می‌کند
 _data_dir = Path("/data") if Path("/data").exists() else Path(__file__).parent
 DB_PATH = _data_dir / "reports.db"
 
@@ -19,7 +18,6 @@ def init_db():
     conn = get_connection()
     c = conn.cursor()
 
-    # کاربران
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -31,7 +29,6 @@ def init_db():
     )
     """)
 
-    # گزارش‌ها
     c.execute("""
     CREATE TABLE IF NOT EXISTS reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,7 +37,7 @@ def init_db():
         project TEXT NOT NULL,
         report_date TEXT NOT NULL,
         day_name TEXT,
-        workers TEXT,              -- JSON list of {name, entry, exit, hours}
+        workers TEXT,
         work_report TEXT,
         materials_in TEXT,
         materials_out TEXT,
@@ -55,14 +52,33 @@ def init_db():
     )
     """)
 
-    # رسانه
     c.execute("""
     CREATE TABLE IF NOT EXISTS media (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         report_id INTEGER NOT NULL,
         file_id TEXT NOT NULL,
-        media_type TEXT NOT NULL,   -- photo / video
+        media_type TEXT NOT NULL,
+        local_path TEXT,
         FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE CASCADE
+    )
+    """)
+
+    # migration: add local_path if missing
+    try:
+        c.execute("ALTER TABLE media ADD COLUMN local_path TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS activity_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor_id INTEGER,
+        actor_name TEXT,
+        action TEXT NOT NULL,
+        target_type TEXT,
+        target_id INTEGER,
+        details TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
@@ -86,6 +102,91 @@ def upsert_user(user_id: int, username: Optional[str], name: str, role: str, pro
     """, (user_id, username, name, role, json.dumps(projects, ensure_ascii=False)))
     conn.commit()
     conn.close()
+
+
+def add_pending_user(username: str, name: str, role: str, projects: List[str]) -> bool:
+    """ثبت کاربر با user_id منفی موقت تا اولین /start"""
+    conn = get_connection()
+    c = conn.cursor()
+    # چک تکراری بودن یوزرنیم
+    c.execute("SELECT user_id FROM users WHERE username = ? COLLATE NOCASE", (username.lstrip("@"),))
+    if c.fetchone():
+        conn.close()
+        return False
+    # user_id موقت منفی بر اساس timestamp
+    temp_id = -int(datetime.now().timestamp())
+    c.execute("""
+    INSERT INTO users (user_id, username, name, role, projects)
+    VALUES (?, ?, ?, ?, ?)
+    """, (temp_id, username.lstrip("@"), name, role, json.dumps(projects, ensure_ascii=False)))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def promote_pending_user(real_user_id: int, username: str) -> Optional[Dict]:
+    """وقتی کاربر با یوزرنیم از قبل ثبت‌شده /start می‌زند، user_id واقعی جایگزین می‌شود"""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username.lstrip("@"),))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return None
+    d = dict(row)
+    if d["user_id"] > 0:
+        # قبلاً ثبت شده با id واقعی
+        conn.close()
+        d["projects"] = json.loads(d["projects"] or "[]")
+        return d
+    # جایگزینی id موقت
+    old_id = d["user_id"]
+    projects = d["projects"]
+    c.execute("DELETE FROM users WHERE user_id = ?", (old_id,))
+    c.execute("""
+    INSERT INTO users (user_id, username, name, role, projects, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+        username = excluded.username,
+        name = excluded.name,
+        role = excluded.role,
+        projects = excluded.projects
+    """, (real_user_id, d["username"], d["name"], d["role"], projects, d.get("created_at")))
+    conn.commit()
+    conn.close()
+    d["user_id"] = real_user_id
+    d["projects"] = json.loads(projects or "[]")
+    return d
+
+
+def update_user(user_id: int, name: Optional[str] = None, role: Optional[str] = None,
+                projects: Optional[List[str]] = None, username: Optional[str] = None):
+    conn = get_connection()
+    c = conn.cursor()
+    current = get_user(user_id)
+    if not current:
+        conn.close()
+        return False
+    name = name if name is not None else current["name"]
+    role = role if role is not None else current["role"]
+    projects = projects if projects is not None else current["projects"]
+    username = username if username is not None else current.get("username")
+    c.execute("""
+    UPDATE users SET name = ?, role = ?, projects = ?, username = ? WHERE user_id = ?
+    """, (name, role, json.dumps(projects, ensure_ascii=False), username, user_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_user(user_id: int) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    ok = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
 
 
 def get_user(user_id: int) -> Optional[Dict]:
@@ -133,10 +234,24 @@ def get_all_users() -> List[Dict]:
 def get_manager_ids() -> List[int]:
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE role = 'manager'")
+    c.execute("SELECT user_id FROM users WHERE role = 'manager' AND user_id > 0")
     ids = [r[0] for r in c.fetchall()]
     conn.close()
     return ids
+
+
+def get_supervisors() -> List[Dict]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE role = 'supervisor' AND user_id > 0")
+    rows = c.fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["projects"] = json.loads(d["projects"] or "[]")
+        result.append(d)
+    return result
 
 
 # ---------- Reports ----------
@@ -170,8 +285,8 @@ def save_report(data: Dict[str, Any], media_list: List[Dict]) -> int:
 
     for m in media_list:
         c.execute(
-            "INSERT INTO media (report_id, file_id, media_type) VALUES (?, ?, ?)",
-            (report_id, m["file_id"], m["type"])
+            "INSERT INTO media (report_id, file_id, media_type, local_path) VALUES (?, ?, ?, ?)",
+            (report_id, m["file_id"], m["type"], m.get("local_path"))
         )
 
     conn.commit()
@@ -187,7 +302,8 @@ def update_report(report_id: int, data: Dict[str, Any], media_list: Optional[Lis
         project = ?, report_date = ?, day_name = ?,
         workers = ?, work_report = ?, materials_in = ?, materials_out = ?,
         food_count = ?, petty_cash = ?, petty_cash_reason = ?,
-        issues = ?, miscellaneous = ?, updated_at = ?
+        issues = ?, miscellaneous = ?, updated_at = ?,
+        supervisor_name = COALESCE(?, supervisor_name)
     WHERE id = ?
     """, (
         data["project"],
@@ -203,6 +319,7 @@ def update_report(report_id: int, data: Dict[str, Any], media_list: Optional[Lis
         data.get("issues", ""),
         data.get("miscellaneous", ""),
         datetime.now().isoformat(timespec="seconds"),
+        data.get("supervisor_name"),
         report_id,
     ))
 
@@ -210,8 +327,8 @@ def update_report(report_id: int, data: Dict[str, Any], media_list: Optional[Lis
         c.execute("DELETE FROM media WHERE report_id = ?", (report_id,))
         for m in media_list:
             c.execute(
-                "INSERT INTO media (report_id, file_id, media_type) VALUES (?, ?, ?)",
-                (report_id, m["file_id"], m["type"])
+                "INSERT INTO media (report_id, file_id, media_type, local_path) VALUES (?, ?, ?, ?)",
+                (report_id, m["file_id"], m["type"], m.get("local_path"))
             )
 
     conn.commit()
@@ -249,6 +366,23 @@ def get_report_media(report_id: int) -> List[Dict]:
     return rows
 
 
+def get_last_report_for_day_project(supervisor_id: int, project: str, report_date: str) -> Optional[Dict]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+    SELECT * FROM reports
+    WHERE supervisor_id = ? AND project = ? AND report_date = ?
+    ORDER BY id DESC LIMIT 1
+    """, (supervisor_id, project, report_date))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["workers"] = json.loads(d["workers"] or "[]")
+    return d
+
+
 def get_reports(
     supervisor_id: Optional[int] = None,
     project: Optional[str] = None,
@@ -283,5 +417,73 @@ def get_reports(
         d = dict(r)
         d["workers"] = json.loads(d["workers"] or "[]")
         rows.append(d)
+    conn.close()
+    return rows
+
+
+def get_reported_projects_on_date(report_date: str) -> List[str]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT project FROM reports WHERE report_date = ?", (report_date,))
+    projects = [r[0] for r in c.fetchall()]
+    conn.close()
+    return projects
+
+
+def get_stats(date_from: str, date_to: str) -> Dict[str, Any]:
+    reports = get_reports(date_from=date_from, date_to=date_to, limit=5000)
+    total_hours = 0.0
+    total_food = 0
+    total_petty = 0.0
+    by_project: Dict[str, int] = {}
+    supervisors = set()
+
+    for r in reports:
+        workers = r.get("workers") or []
+        for w in workers:
+            try:
+                total_hours += float(w.get("hours") or 0)
+            except (TypeError, ValueError):
+                pass
+        total_food += int(r.get("food_count") or 0)
+        try:
+            total_petty += float(r.get("petty_cash") or 0)
+        except (TypeError, ValueError):
+            pass
+        p = r.get("project") or "—"
+        by_project[p] = by_project.get(p, 0) + 1
+        if r.get("supervisor_name"):
+            supervisors.add(r["supervisor_name"])
+
+    return {
+        "count": len(reports),
+        "total_hours": round(total_hours, 1),
+        "total_food": total_food,
+        "total_petty_cash": total_petty,
+        "by_project": by_project,
+        "supervisors_count": len(supervisors),
+        "reports": reports,
+    }
+
+
+# ---------- Activity log ----------
+
+def log_activity(actor_id: int, actor_name: str, action: str,
+                 target_type: str = None, target_id: int = None, details: str = None):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+    INSERT INTO activity_log (actor_id, actor_name, action, target_type, target_id, details)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (actor_id, actor_name, action, target_type, target_id, details))
+    conn.commit()
+    conn.close()
+
+
+def get_activity_log(limit: int = 30) -> List[Dict]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM activity_log ORDER BY id DESC LIMIT ?", (limit,))
+    rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows

@@ -1,15 +1,20 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8885731079:AAEOiPfe56eq_oZQEm9ksXucDTKMINfKOi4")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 # پروژه‌های فعال
 PROJECTS = ["گلستان", "نارنجستان", "شمشک", "سروستان", "کامران"]
 
 # حداکثر رسانه در هر گزارش
 MAX_MEDIA = 6
+
+# ساعت یادآوری (۲۴ ساعته)
+REMINDER_HOUR = 18
+REMINDER_MINUTE = 0
 
 # نام‌های روز هفته به فارسی (شنبه = 0 در jdatetime)
 PERSIAN_WEEKDAYS = [
@@ -23,12 +28,11 @@ PERSIAN_WEEKDAYS = [
 ]
 
 # اطلاعات اولیه کاربران بر اساس یوزرنیم
-# بعد از اولین /start، user_id عددی ذخیره می‌شود
 INITIAL_USERS = {
     "RAA1362": {
         "name": "مهندس ریاض اشعری",
         "role": "manager",
-        "projects": [],  # مدیر همه پروژه‌ها را می‌بیند
+        "projects": [],
     },
     "Mojganhk": {
         "name": "مهندس مژگان",
@@ -51,3 +55,11 @@ INITIAL_USERS = {
         "projects": ["کامران", "سروستان"],
     },
 }
+
+_data_dir = Path("/data") if Path("/data").exists() else Path(__file__).parent
+MEDIA_DIR = _data_dir / "media_files"
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+FONTS_DIR = Path(__file__).parent / "fonts"
+PERSIAN_FONT_PATH = FONTS_DIR / "Vazirmatn-Regular.ttf"
+PERSIAN_FONT_BOLD_PATH = FONTS_DIR / "Vazirmatn-Bold.ttf"
