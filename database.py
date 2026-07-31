@@ -1,7 +1,7 @@
 import sqlite3
 import json
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 _data_dir = Path("/data") if Path("/data").exists() else Path(__file__).parent
@@ -63,7 +63,6 @@ def init_db():
     )
     """)
 
-    # migration: add local_path if missing
     try:
         c.execute("ALTER TABLE media ADD COLUMN local_path TEXT")
     except sqlite3.OperationalError:
@@ -78,6 +77,15 @@ def init_db():
         target_type TEXT,
         target_id INTEGER,
         details TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS workers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        active INTEGER DEFAULT 1,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
     """)
@@ -105,15 +113,12 @@ def upsert_user(user_id: int, username: Optional[str], name: str, role: str, pro
 
 
 def add_pending_user(username: str, name: str, role: str, projects: List[str]) -> bool:
-    """ثبت کاربر با user_id منفی موقت تا اولین /start"""
     conn = get_connection()
     c = conn.cursor()
-    # چک تکراری بودن یوزرنیم
     c.execute("SELECT user_id FROM users WHERE username = ? COLLATE NOCASE", (username.lstrip("@"),))
     if c.fetchone():
         conn.close()
         return False
-    # user_id موقت منفی بر اساس timestamp
     temp_id = -int(datetime.now().timestamp())
     c.execute("""
     INSERT INTO users (user_id, username, name, role, projects)
@@ -125,7 +130,6 @@ def add_pending_user(username: str, name: str, role: str, projects: List[str]) -
 
 
 def promote_pending_user(real_user_id: int, username: str) -> Optional[Dict]:
-    """وقتی کاربر با یوزرنیم از قبل ثبت‌شده /start می‌زند، user_id واقعی جایگزین می‌شود"""
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username.lstrip("@"),))
@@ -135,11 +139,9 @@ def promote_pending_user(real_user_id: int, username: str) -> Optional[Dict]:
         return None
     d = dict(row)
     if d["user_id"] > 0:
-        # قبلاً ثبت شده با id واقعی
         conn.close()
         d["projects"] = json.loads(d["projects"] or "[]")
         return d
-    # جایگزینی id موقت
     old_id = d["user_id"]
     projects = d["projects"]
     c.execute("DELETE FROM users WHERE user_id = ?", (old_id,))
@@ -161,12 +163,11 @@ def promote_pending_user(real_user_id: int, username: str) -> Optional[Dict]:
 
 def update_user(user_id: int, name: Optional[str] = None, role: Optional[str] = None,
                 projects: Optional[List[str]] = None, username: Optional[str] = None):
-    conn = get_connection()
-    c = conn.cursor()
     current = get_user(user_id)
     if not current:
-        conn.close()
         return False
+    conn = get_connection()
+    c = conn.cursor()
     name = name if name is not None else current["name"]
     role = role if role is not None else current["role"]
     projects = projects if projects is not None else current["projects"]
@@ -252,6 +253,91 @@ def get_supervisors() -> List[Dict]:
         d["projects"] = json.loads(d["projects"] or "[]")
         result.append(d)
     return result
+
+
+# ---------- Workers ----------
+
+def add_worker(name: str) -> Optional[int]:
+    name = name.strip()
+    if not name:
+        return None
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO workers (name, active) VALUES (?, 1)", (name,))
+        wid = c.lastrowid
+        conn.commit()
+        conn.close()
+        return wid
+    except sqlite3.IntegrityError:
+        # اگر قبلاً بوده، فعالش کن
+        c.execute("UPDATE workers SET active = 1 WHERE name = ?", (name,))
+        c.execute("SELECT id FROM workers WHERE name = ?", (name,))
+        row = c.fetchone()
+        conn.commit()
+        conn.close()
+        return row[0] if row else None
+
+
+def deactivate_worker(worker_id: int) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("UPDATE workers SET active = 0 WHERE id = ?", (worker_id,))
+    ok = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+
+def delete_worker(worker_id: int) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM workers WHERE id = ?", (worker_id,))
+    ok = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+
+def rename_worker(worker_id: int, new_name: str) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE workers SET name = ? WHERE id = ?", (new_name.strip(), worker_id))
+        ok = c.rowcount > 0
+        conn.commit()
+        conn.close()
+        return ok
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+
+def get_active_workers() -> List[Dict]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM workers WHERE active = 1 ORDER BY name")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_all_workers() -> List[Dict]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM workers ORDER BY active DESC, name")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_worker(worker_id: int) -> Optional[Dict]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM workers WHERE id = ?", (worker_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 # ---------- Reports ----------
@@ -465,8 +551,6 @@ def get_stats(date_from: str, date_to: str) -> Dict[str, Any]:
         "reports": reports,
     }
 
-
-# ---------- Activity log ----------
 
 def log_activity(actor_id: int, actor_name: str, action: str,
                  target_type: str = None, target_id: int = None, details: str = None):
