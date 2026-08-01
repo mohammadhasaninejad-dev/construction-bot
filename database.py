@@ -90,6 +90,15 @@ def init_db():
     )
     """)
 
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -571,3 +580,76 @@ def get_activity_log(limit: int = 30) -> List[Dict]:
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
+
+# ---------- Projects ----------
+
+def seed_projects_if_empty(default_names: list):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM projects")
+    if c.fetchone()[0] == 0:
+        for name in default_names:
+            try:
+                c.execute("INSERT INTO projects (name, active) VALUES (?, 1)", (name,))
+            except sqlite3.IntegrityError:
+                pass
+        conn.commit()
+    conn.close()
+
+
+def get_active_projects() -> List[str]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT name FROM projects WHERE active = 1 ORDER BY name")
+    names = [r[0] for r in c.fetchall()]
+    conn.close()
+    return names
+
+
+def get_all_projects() -> List[Dict]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM projects ORDER BY active DESC, name")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def add_project(name: str) -> Optional[int]:
+    name = name.strip()
+    if not name:
+        return None
+    conn = get_connection()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO projects (name, active) VALUES (?, 1)", (name,))
+        pid = c.lastrowid
+        conn.commit()
+        conn.close()
+        return pid
+    except sqlite3.IntegrityError:
+        c.execute("UPDATE projects SET active = 1 WHERE name = ?", (name,))
+        c.execute("SELECT id FROM projects WHERE name = ?", (name,))
+        row = c.fetchone()
+        conn.commit()
+        conn.close()
+        return row[0] if row else None
+
+
+def deactivate_project(project_id: int) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("UPDATE projects SET active = 0 WHERE id = ?", (project_id,))
+    ok = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return ok
+
+
+def get_project_by_name(name: str) -> Optional[Dict]:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM projects WHERE name = ?", (name.strip(),))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None

@@ -10,7 +10,7 @@ PROJECTS = ["گلستان", "نارنجستان", "شمشک", "سروستان", 
 
 MAX_MEDIA = 6
 
-REMINDER_HOUR = 18
+REMINDER_HOUR = 20
 REMINDER_MINUTE = 0
 
 PERSIAN_WEEKDAYS = [

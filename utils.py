@@ -178,12 +178,18 @@ def format_stats_text(stats: Dict, title: str, missing_projects: Optional[List[s
 
 
 def calculate_hours(entry: str, exit_: str) -> float:
+    """ساعت کاری؛ اگر بازه بیش از ۶ ساعت باشد ۱ ساعت ناهار کم می‌شود."""
     try:
         eh, em = map(int, entry.split(":"))
         xh, xm = map(int, exit_.split(":"))
         total = (xh * 60 + xm) - (eh * 60 + em)
         if total < 0:
             total += 24 * 60
+        # ناهار ۱ ساعته برای روز کاری معمولی (مثلاً ۸ تا ۱۷ = ۹ ساعت خام → ۸ کارکرد)
+        if total > 6 * 60:
+            total -= 60
+        if total < 0:
+            total = 0
         return round(total / 60, 1)
     except Exception:
         return 8.0

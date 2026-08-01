@@ -39,11 +39,13 @@ logger = logging.getLogger(__name__)
     EXPORT_MENU, EXPORT_SINGLE_ID, EXPORT_DATE_FROM, EXPORT_DATE_TO,
     WORKER_MENU, WORKER_ADD, WORKER_DELETE,
     EDIT_PICK_REPORT,
-) = range(39)
+    PROJECT_MENU, PROJECT_ADD, PROJECT_DELETE,
+) = range(42)
 
 BACK = "🔙 بازگشت"
 CANCEL_BTN = "❌ انصراف"
 DONE_BTN = "✅ تمام"
+NONE_BTN = "➖ ندارد"
 CONFIRM_SAVE = "✅ ثبت نهایی"
 CONFIRM_EDIT = "✏️ ویرایش"
 YES_DELETE = "🗑️ بله حذف شود"
@@ -56,7 +58,8 @@ def main_menu_keyboard(role: str, projects: list = None):
             ["📊 آمار و خلاصه", "🔍 فیلتر گزارش‌ها"],
             ["📁 خروجی اکسل / PDF", "🗑️ حذف گزارش"],
             ["✏️ ویرایش گزارش", "👷 مدیریت کارگران"],
-            ["👥 مدیریت کاربران", "📜 لاگ فعالیت‌ها"],
+            ["🏗 مدیریت پروژه‌ها", "👥 مدیریت کاربران"],
+            ["📜 لاگ فعالیت‌ها"],
             ["❓ راهنما"],
         ]
     else:
@@ -71,14 +74,27 @@ def main_menu_keyboard(role: str, projects: list = None):
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 
-def nav_keyboard(extra_rows=None, with_back=True):
+def nav_keyboard(extra_rows=None, with_back=True, with_none=False):
     rows = list(extra_rows or [])
     nav = []
+    if with_none:
+        nav.append(NONE_BTN)
     if with_back:
         nav.append(BACK)
     nav.append(CANCEL_BTN)
     rows.append(nav)
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def get_projects_list():
+    """لیست پروژه‌های فعال از دیتابیس (با fallback به config)"""
+    try:
+        names = db.get_active_projects()
+        if names:
+            return names
+    except Exception:
+        pass
+    return list(config.PROJECTS)
 
 
 def get_or_register_user(update: Update):
@@ -166,7 +182,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "\nامکانات مدیر:\n"
             "📅 گزارش امروز / 📆 این هفته\n"
             "📊 آمار، 🔍 فیلتر، 📁 خروجی\n"
-            "👷 مدیریت کارگران (لیست برای انتخاب سرپرست)\n"
+            "👷 مدیریت کارگران\n"
+            "🏗 مدیریت پروژه‌ها\n"
             "👥 مدیریت کاربران، 📜 لاگ\n"
             "⏰ یادآوری خودکار ساعت ۱۸\n"
         )
@@ -344,7 +361,7 @@ async def _ask_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "می‌توانید نام‌ها را دستی وارد کنید (هر خط: نام | ورود | خروج)\n"
             "یا «ندارد» بفرستید.\n"
             "مدیر باید از «👷 مدیریت کارگران» لیست را بسازد.",
-            reply_markup=nav_keyboard(),
+            reply_markup=nav_keyboard(with_none=True),
         )
         context.user_data["workers_manual"] = True
         return WORKERS_SELECT
@@ -356,7 +373,7 @@ async def _ask_workers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"مثال: 1 3 5\n\n" + "\n".join(lines) +
         "\n\nاگر کسی نیست: ندارد\n"
         "برای ورود دستی نام‌ها: دستی",
-        reply_markup=nav_keyboard(),
+        reply_markup=nav_keyboard(with_none=True),
     )
     context.user_data["workers_manual"] = False
     return WORKERS_SELECT
@@ -374,10 +391,15 @@ async def workers_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📝 گزارش کار امروز را بنویسید:", reply_markup=nav_keyboard())
         return WORK_REPORT
 
+    if text == NONE_BTN or text in ("ندارد", "هیچ", "-"):
+        context.user_data["report"]["workers"] = []
+        await update.message.reply_text("📝 گزارش کار امروز را بنویسید:", reply_markup=nav_keyboard())
+        return WORK_REPORT
+
     if text == "دستی" or context.user_data.get("workers_manual"):
         if text == "دستی":
             await update.message.reply_text(
-                "هر خط یک کارگر:\nنام | ورود | خروج\nمثال:\nعلی | 07:30 | 16:00",
+                "هر خط یک کارگر:\nنام | ورود | خروج\nمثال:\nعلی | 08:00 | 17:00",
                 reply_markup=nav_keyboard(),
             )
             context.user_data["workers_manual"] = True
@@ -391,7 +413,7 @@ async def workers_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts = [p.strip() for p in line.replace("،", "|").split("|")]
             name = parts[0] if parts else "نامشخص"
             entry = parts[1] if len(parts) > 1 else "08:00"
-            exit_ = parts[2] if len(parts) > 2 else "16:00"
+            exit_ = parts[2] if len(parts) > 2 else "17:00"
             hours = calculate_hours(entry, exit_)
             workers.append({"name": name, "entry": entry, "exit": exit_, "hours": hours})
         context.user_data["report"]["workers"] = workers
@@ -438,7 +460,7 @@ async def workers_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
     workers = []
     if text in ("پیش‌فرض", "default", "پیشفرض"):
         for name in names:
-            workers.append({"name": name, "entry": "08:00", "exit": "16:00", "hours": 8.0})
+            workers.append({"name": name, "entry": "08:00", "exit": "17:00", "hours": 8.0})
     elif "|" in text or "|" in text.replace("،", "|"):
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         if len(lines) == 1 and lines[0].count("|") == 1:
@@ -462,10 +484,10 @@ async def workers_hours(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if name in by_name:
                     entry, exit_ = by_name[name]
                 else:
-                    entry, exit_ = "08:00", "16:00"
+                    entry, exit_ = "08:00", "17:00"
                 workers.append({"name": name, "entry": entry, "exit": exit_, "hours": calculate_hours(entry, exit_)})
     else:
-        await update.message.reply_text("فرمت نامعتبر. «پیش‌فرض» یا 07:30 | 16:00 بفرستید.")
+        await update.message.reply_text("فرمت نامعتبر. «پیش‌فرض» یا 08:00 | 17:00 بفرستید.")
         return WORKERS_HOURS
 
     context.user_data["report"]["workers"] = workers
@@ -480,7 +502,7 @@ async def work_report_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_back(text):
         return await _ask_workers(update, context)
     context.user_data["report"]["work_report"] = text
-    await update.message.reply_text("📦 لوازم ورودی به کارگاه (یا ندارد):", reply_markup=nav_keyboard())
+    await update.message.reply_text("📦 لوازم ورودی به کارگاه:", reply_markup=nav_keyboard(with_none=True))
     return MATERIALS_IN
 
 
@@ -491,8 +513,10 @@ async def materials_in_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if _is_back(text):
         await update.message.reply_text("📝 گزارش کار امروز را بنویسید:", reply_markup=nav_keyboard())
         return WORK_REPORT
+    if text == NONE_BTN:
+        text = "ندارد"
     context.user_data["report"]["materials_in"] = text
-    await update.message.reply_text("📤 لوازم خروجی از کارگاه (یا ندارد):", reply_markup=nav_keyboard())
+    await update.message.reply_text("📤 لوازم خروجی از کارگاه:", reply_markup=nav_keyboard(with_none=True))
     return MATERIALS_OUT
 
 
@@ -501,8 +525,10 @@ async def materials_out_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if _is_cancel(text):
         return await cancel(update, context)
     if _is_back(text):
-        await update.message.reply_text("📦 لوازم ورودی:", reply_markup=nav_keyboard())
+        await update.message.reply_text("📦 لوازم ورودی:", reply_markup=nav_keyboard(with_none=True))
         return MATERIALS_IN
+    if text == NONE_BTN:
+        text = "ندارد"
     context.user_data["report"]["materials_out"] = text
     await update.message.reply_text("🍽 تعداد غذا را عدد وارد کنید:", reply_markup=nav_keyboard())
     return FOOD_COUNT
@@ -513,7 +539,7 @@ async def food_count_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_cancel(text):
         return await cancel(update, context)
     if _is_back(text):
-        await update.message.reply_text("📤 لوازم خروجی:", reply_markup=nav_keyboard())
+        await update.message.reply_text("📤 لوازم خروجی:", reply_markup=nav_keyboard(with_none=True))
         return MATERIALS_OUT
     trans = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
     try:
@@ -523,20 +549,36 @@ async def food_count_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return FOOD_COUNT
     context.user_data["report"]["food_count"] = count
     await update.message.reply_text(
-        "💰 مبلغ تنخواه و دلیل:\nمثال: 1500000 | خرید سیمان\nیا ندارد",
-        reply_markup=nav_keyboard(),
+        "💰 مبلغ تنخواه و دلیل:\nمثال: 1500000 | خرید سیمان\n"
+        "می‌توانید عکس فاکتور/رسید هم بفرستید، بعد مبلغ را بنویسید.",
+        reply_markup=nav_keyboard(with_none=True),
     )
     return PETTY_CASH
 
 
 async def petty_cash_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    # امکان ارسال عکس فاکتور قبل از/همراه مبلغ
+    if update.message.photo:
+        report = context.user_data["report"]
+        media_list = report.setdefault("media", [])
+        if len(media_list) < config.MAX_MEDIA:
+            media_list.append({"file_id": update.message.photo[-1].file_id, "type": "photo"})
+            await update.message.reply_text(
+                f"🖼 عکس تنخواه/فاکتور ذخیره شد ({len(media_list)}/{config.MAX_MEDIA}).\n"
+                "مبلغ و دلیل را بنویسید یا دکمه ندارد را بزنید.",
+                reply_markup=nav_keyboard(with_none=True),
+            )
+        else:
+            await update.message.reply_text("ظرفیت رسانه پر است. مبلغ را بنویسید یا ندارد.")
+        return PETTY_CASH
+
+    text = (update.message.text or "").strip()
     if _is_cancel(text):
         return await cancel(update, context)
     if _is_back(text):
         await update.message.reply_text("🍽 تعداد غذا:", reply_markup=nav_keyboard())
         return FOOD_COUNT
-    if text in ("ندارد", "0", "۰", "-"):
+    if text == NONE_BTN or text in ("ندارد", "0", "۰", "-"):
         context.user_data["report"]["petty_cash"] = 0
         context.user_data["report"]["petty_cash_reason"] = ""
     else:
@@ -547,7 +589,7 @@ async def petty_cash_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             amount = 0
         context.user_data["report"]["petty_cash"] = amount
         context.user_data["report"]["petty_cash_reason"] = parts[1] if len(parts) > 1 else text
-    await update.message.reply_text("⚠️ ایرادات (یا ندارد):", reply_markup=nav_keyboard())
+    await update.message.reply_text("⚠️ ایرادات:", reply_markup=nav_keyboard(with_none=True))
     return ISSUES
 
 
@@ -556,10 +598,15 @@ async def issues_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_cancel(text):
         return await cancel(update, context)
     if _is_back(text):
-        await update.message.reply_text("💰 تنخواه:", reply_markup=nav_keyboard())
+        await update.message.reply_text(
+            "💰 مبلغ تنخواه و دلیل:",
+            reply_markup=nav_keyboard(with_none=True),
+        )
         return PETTY_CASH
+    if text == NONE_BTN:
+        text = "ندارد"
     context.user_data["report"]["issues"] = text
-    await update.message.reply_text("📌 متفرقه (یا ندارد):", reply_markup=nav_keyboard())
+    await update.message.reply_text("📌 متفرقه:", reply_markup=nav_keyboard(with_none=True))
     return MISC
 
 
@@ -568,8 +615,10 @@ async def misc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _is_cancel(text):
         return await cancel(update, context)
     if _is_back(text):
-        await update.message.reply_text("⚠️ ایرادات:", reply_markup=nav_keyboard())
+        await update.message.reply_text("⚠️ ایرادات:", reply_markup=nav_keyboard(with_none=True))
         return ISSUES
+    if text == NONE_BTN:
+        text = "ندارد"
     context.user_data["report"]["miscellaneous"] = text
     context.user_data["report"]["media"] = []
     await update.message.reply_text(
@@ -588,7 +637,7 @@ async def media_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _is_cancel(text):
             return await cancel(update, context)
         if _is_back(text):
-            await update.message.reply_text("📌 متفرقه:", reply_markup=nav_keyboard())
+            await update.message.reply_text("📌 متفرقه:", reply_markup=nav_keyboard(with_none=True))
             return MISC
         if text in (DONE_BTN, "تمام", "تمام شد", "پایان", "done"):
             return await show_confirm(update, context)
@@ -943,7 +992,7 @@ async def today_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = today_gregorian()
     stats = db.get_stats(today, today)
     reported = db.get_reported_projects_on_date(today)
-    missing = [p for p in config.PROJECTS if p not in reported]
+    missing = [p for p in get_projects_list() if p not in reported]
     text = format_stats_text(stats, f"خلاصه امروز ({gregorian_to_jalali_display(today)})", missing)
     if stats["reports"]:
         text += "\n\n" + "\n".join(format_report_summary_line(r) for r in stats["reports"][:30])
@@ -978,7 +1027,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st_today = db.get_stats(today, today)
     st_week = db.get_stats(d_from, d_to)
     reported = db.get_reported_projects_on_date(today)
-    missing = [p for p in config.PROJECTS if p not in reported]
+    missing = [p for p in get_projects_list() if p not in reported]
     text = format_stats_text(st_today, f"امروز ({gregorian_to_jalali_display(today)})", missing)
     text += "\n\n" + format_stats_text(
         st_week,
@@ -1004,7 +1053,7 @@ async def filter_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if _is_cancel(text):
         return await cancel(update, context)
     if "پروژه" in text:
-        buttons = [[p] for p in config.PROJECTS] + [[CANCEL_BTN]]
+        buttons = [[p] for p in get_projects_list()] + [[CANCEL_BTN]]
         await update.message.reply_text("پروژه:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
         return FILTER_PROJECT
     if "تاریخ" in text:
@@ -1395,7 +1444,7 @@ async def user_add_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["new_user"]["projects"] = []
         return await _finish_add_user(update, context)
     context.user_data["new_user"]["projects"] = []
-    buttons = [[p] for p in config.PROJECTS] + [[DONE_BTN, CANCEL_BTN]]
+    buttons = [[p] for p in get_projects_list()] + [[DONE_BTN, CANCEL_BTN]]
     await update.message.reply_text("پروژه‌ها را انتخاب کنید، بعد تمام:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
     return USER_ADD_PROJECTS
 
@@ -1406,7 +1455,7 @@ async def user_add_projects(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await cancel(update, context)
     if text in (DONE_BTN, "تمام"):
         return await _finish_add_user(update, context)
-    if text in config.PROJECTS:
+    if text in get_projects_list():
         projs = context.user_data["new_user"].setdefault("projects", [])
         if text not in projs:
             projs.append(text)
@@ -1460,7 +1509,7 @@ async def user_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return USER_EDIT_VALUE
     if text == "پروژه‌ها":
         context.user_data["temp_projects"] = []
-        buttons = [[p] for p in config.PROJECTS] + [[DONE_BTN, "پاک کردن همه"]]
+        buttons = [[p] for p in get_projects_list()] + [[DONE_BTN, "پاک کردن همه"]]
         await update.message.reply_text("پروژه‌ها:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
         return USER_EDIT_VALUE
     return USER_EDIT_FIELD
@@ -1480,7 +1529,7 @@ async def user_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db.update_user(uid, projects=[])
         elif text in (DONE_BTN, "تمام"):
             db.update_user(uid, projects=context.user_data.get("temp_projects") or [])
-        elif text in config.PROJECTS:
+        elif text in get_projects_list():
             projs = context.user_data.setdefault("temp_projects", [])
             if text not in projs:
                 projs.append(text)
@@ -1507,6 +1556,107 @@ async def user_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         db.delete_user(uid)
         db.log_activity(u["user_id"], u["name"], "delete_user", "user", uid, target.get("name"))
         await update.message.reply_text(f"حذف شد: {target['name']}", reply_markup=main_menu_keyboard(u["role"], u.get("projects")))
+    return ConversationHandler.END
+
+
+
+# ---------- Project management ----------
+
+@require_user
+async def project_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data["db_user"]["role"] != "manager":
+        await update.message.reply_text("فقط مدیر.")
+        return ConversationHandler.END
+    projects = db.get_all_projects()
+    if projects:
+        lines = [
+            f"{'✅' if pr['active'] else '⏸️'} #{pr['id']} {pr['name']}"
+            for pr in projects
+        ]
+        body = "\n".join(lines)
+    else:
+        body = "هنوز پروژه‌ای تعریف نشده."
+    buttons = [["➕ افزودن پروژه", "🗑️ حذف پروژه"], [CANCEL_BTN]]
+    await update.message.reply_text(
+        "🏗 لیست پروژه‌ها:\n\n" + body + "\n\nعملیات:",
+        reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True),
+    )
+    return PROJECT_MENU
+
+
+async def project_menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if _is_cancel(text):
+        return await cancel(update, context)
+    if "افزودن" in text:
+        await update.message.reply_text(
+            "نام پروژه(ها) را بفرستید (هر خط یک نام):",
+            reply_markup=nav_keyboard(with_back=False),
+        )
+        return PROJECT_ADD
+    if "حذف" in text:
+        projects = db.get_all_projects()
+        active = [pr for pr in projects if pr["active"]]
+        if not active:
+            await update.message.reply_text("پروژه فعالی نیست.")
+            return await cancel(update, context)
+        buttons = [[f"#{pr['id']} {pr['name']}"] for pr in active] + [[CANCEL_BTN]]
+        await update.message.reply_text(
+            "کدام پروژه غیرفعال شود؟",
+            reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True),
+        )
+        return PROJECT_DELETE
+    return PROJECT_MENU
+
+
+async def project_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if _is_cancel(text):
+        return await cancel(update, context)
+    u = context.user_data.get("db_user") or get_or_register_user(update)
+    added = []
+    for line in text.splitlines():
+        name = line.strip()
+        if name:
+            pid = db.add_project(name)
+            if pid:
+                added.append(name)
+    if added:
+        db.log_activity(u["user_id"], u["name"], "add_projects", "project", None, ", ".join(added))
+        await update.message.reply_text(
+            f"اضافه شد: {', '.join(added)}",
+            reply_markup=main_menu_keyboard(u["role"], u.get("projects")),
+        )
+    else:
+        await update.message.reply_text(
+            "چیزی اضافه نشد.",
+            reply_markup=main_menu_keyboard(u["role"], u.get("projects")),
+        )
+    return ConversationHandler.END
+
+
+async def project_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if _is_cancel(text):
+        return await cancel(update, context)
+    u = context.user_data.get("db_user") or get_or_register_user(update)
+    import re
+    m = re.search(r"#(\d+)", text)
+    if not m:
+        await update.message.reply_text("از لیست انتخاب کنید.")
+        return PROJECT_DELETE
+    pid = int(m.group(1))
+    name = text
+    for pr in db.get_all_projects():
+        if pr["id"] == pid:
+            name = pr["name"]
+            break
+    db.deactivate_project(pid)
+    db.log_activity(u["user_id"], u["name"], "deactivate_project", "project", pid, name)
+    await update.message.reply_text(
+        f"پروژه «{name}» غیرفعال شد.",
+        reply_markup=main_menu_keyboard(u["role"], u.get("projects")),
+    )
     return ConversationHandler.END
 
 
@@ -1607,6 +1757,8 @@ async def handle_text_fallback(update: Update, context: ContextTypes.DEFAULT_TYP
         "خروجی اکسل / PDF": export_menu,
         "👷 مدیریت کارگران": worker_menu,
         "مدیریت کارگران": worker_menu,
+        "🏗 مدیریت پروژه‌ها": project_menu,
+        "مدیریت پروژه‌ها": project_menu,
         "👥 مدیریت کاربران": manage_users_menu,
         "مدیریت کاربران": manage_users_menu,
         "📜 لاگ فعالیت‌ها": activity_log_cmd,
@@ -1659,6 +1811,7 @@ def main():
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN در .env تنظیم نشده است.")
     db.init_db()
+    db.seed_projects_if_empty(config.PROJECTS)
     app = Application.builder().token(config.BOT_TOKEN).build()
 
     conv_report = ConversationHandler(
@@ -1680,7 +1833,7 @@ def main():
             MATERIALS_IN: [MessageHandler(filters.TEXT & ~filters.COMMAND, materials_in_input)],
             MATERIALS_OUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, materials_out_input)],
             FOOD_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, food_count_input)],
-            PETTY_CASH: [MessageHandler(filters.TEXT & ~filters.COMMAND, petty_cash_input)],
+            PETTY_CASH: [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), petty_cash_input)],
             ISSUES: [MessageHandler(filters.TEXT & ~filters.COMMAND, issues_input)],
             MISC: [MessageHandler(filters.TEXT & ~filters.COMMAND, misc_input)],
             MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO | (filters.TEXT & ~filters.COMMAND), media_input)],
@@ -1752,7 +1905,19 @@ def main():
     app.add_handler(conv_filter)
     app.add_handler(conv_export)
     app.add_handler(conv_users)
+    conv_projects = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^(🏗 )?مدیریت پروژه‌ها$"), project_menu)],
+        states={
+            PROJECT_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, project_menu_choice)],
+            PROJECT_ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, project_add)],
+            PROJECT_DELETE: [MessageHandler(filters.TEXT & ~filters.COMMAND, project_delete)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
     app.add_handler(conv_workers)
+    app.add_handler(conv_projects)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_fallback))
 
     if app.job_queue:
