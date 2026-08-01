@@ -441,7 +441,7 @@ async def workers_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"انتخاب‌شده: {', '.join(selected)}\n\n"
         "ساعات را بفرستید:\n"
-        "• کلمه «پیش‌فرض» = ورود ۰۸:۰۰ خروج ۱۶:۰۰ برای همه\n"
+        "• کلمه «پیش‌فرض» = ورود 08:00 خروج 17:00 برای همه\n"
         "• یا هر خط: نام | ورود | خروج\n"
         "• یا یک خط برای همه: 07:30 | 16:00",
         reply_markup=nav_keyboard(),
